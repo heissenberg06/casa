@@ -1,0 +1,24 @@
+# --- Sanal ortam ---
+venv/
+.venv/
+env/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# --- KASA DOSYASI - ASLA commit edilmemeli! ---
+*.dat
+*.dat.tmp
+.sifre_kasasi.dat
+
+# --- macOS ---
+.DS_Store
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
