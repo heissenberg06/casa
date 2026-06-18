@@ -4,6 +4,8 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#)
 
+![Casa Password Vault](screenshot.jpeg)
+
 A minimal, fully offline password manager for macOS. Your credentials never leave
 your machine and are stored on disk only as authenticated ciphertext, unlocked by a
 single master password that is never saved anywhere.
