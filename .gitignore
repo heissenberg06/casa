@@ -32,3 +32,8 @@ dist/
 
 # --- Claude Code memory ---
 .claude/
+
+# Derleme çıktıları
+dist/
+build/
+*.app
