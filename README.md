@@ -50,6 +50,8 @@ cannot be recovered — this is intentional; there is no backdoor.**
 
 ## Installation
 
+### Option A — Run from source
+
 ```bash
 git clone https://github.com/heissenberg06/casa.git
 cd casa
@@ -57,14 +59,26 @@ cd casa
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
-
-## Usage
-
-```bash
-source venv/bin/activate   # if not already active
 python3 casa.py
 ```
+
+### Option B — Build a standalone macOS app
+
+No Python installation required on the target machine.
+
+```bash
+# One-time setup
+pip3 install pyinstaller
+
+# Build
+bash build.sh
+```
+
+This produces `dist/Casa.app` (38 MB, self-contained). Drag it to `/Applications` or distribute
+the generated `Casa-macOS.zip`.
+
+> **First-launch note (Gatekeeper):** Because the app is unsigned, right-click → Open on first
+> launch and confirm the dialog. Subsequent launches work with a normal double-click.
 
 On first launch you set a master password and a new vault is created. On later launches the
 same password unlocks it. The vault is stored at `~/.sifre_kasasi.dat`.

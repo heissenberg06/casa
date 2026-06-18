@@ -15,10 +15,19 @@ __pycache__/
 *.dat.tmp
 .sifre_kasasi.dat
 
+# --- PyInstaller build çıktıları ---
+build/
+dist/
+*.zip
+
 # --- macOS ---
 .DS_Store
+**/.DS_Store
 
-# --- IDE ---
+# --- IDE / araçlar ---
 .idea/
 .vscode/
 *.swp
+
+# --- Claude Code ---
+.claude/
