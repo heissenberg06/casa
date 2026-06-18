@@ -950,8 +950,8 @@ class VaultApp:
         self._clip_token  = None
         self._lock_token  = None
 
-        root.geometry('720x440')
-        root.minsize(580, 340)
+        root.geometry('820x440')
+        root.minsize(720, 340)
         root.protocol('WM_DELETE_WINDOW', self._on_close)
 
         self._build_ui()
@@ -977,10 +977,10 @@ class VaultApp:
         self._btn_lock.pack(side='left', padx=6)
 
         # Language selector (right side)
-        self._lang_var = tk.StringVar(value=_lang)
+        self._lang_var = tk.StringVar(value=LANG_NAMES[_lang])
         lang_frame = ttk.Frame(bar)
         ttk.Label(lang_frame, text=t('label_language')).pack(side='left')
-        lang_menu = ttk.OptionMenu(lang_frame, self._lang_var, _lang)
+        lang_menu = ttk.OptionMenu(lang_frame, self._lang_var, LANG_NAMES[_lang])
         lang_menu['menu'].delete(0, 'end')
         for code, name in LANG_NAMES.items():
             lang_menu['menu'].add_command(
@@ -1032,7 +1032,7 @@ class VaultApp:
         global _lang
         _lang = code
         _save_lang()
-        self._lang_var.set(code)
+        self._lang_var.set(LANG_NAMES[code])
         self._apply_lang()
 
     # ---- Auto-lock ----

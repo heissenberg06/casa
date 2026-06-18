@@ -56,9 +56,9 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,        # terminal penceresi açılmaz
+    console=False,        # no terminal window
     argv_emulation=False,
-    target_arch=None,     # mevcut mimari (arm64 veya x86_64)
+    target_arch=None,     # native arch (arm64 or x86_64)
     codesign_identity=None,
     entitlements_file=None,
 )
@@ -88,6 +88,6 @@ app = BUNDLE(
         'NSHumanReadableDescription': 'Offline password vault',
         'NSRequiresAquaSystemAppearance': False,
         'LSMinimumSystemVersion': '12.0',
-        # Gerekli izinler yok — tamamen offline, dosya sistemi dışına erişmez
+        # No special entitlements needed — fully offline, no network or system access
     },
 )
