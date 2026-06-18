@@ -29,7 +29,22 @@ single master password that is never saved anywhere.
 - **Vault format versioning** — a magic header + version byte allows safe format migrations.
 - **Atomic writes** — vault is written to a `.tmp` file (created with `0o600` permissions
   from the start) then atomically renamed, preventing partial writes from corrupting data.
+- **Multilingual UI** — 7 languages selectable at runtime (no restart needed).
 - **No network code** — genuinely offline; nothing is ever transmitted.
+
+## Languages
+
+The language can be switched from the toolbar at any time. The preference is saved automatically.
+
+| Code | Language |
+|------|----------|
+| `en` | English  |
+| `es` | Español  |
+| `de` | Deutsch  |
+| `zh` | 中文     |
+| `ja` | 日本語   |
+| `fr` | Français |
+| `hi` | हिन्दी   |
 
 ## Security architecture
 
@@ -74,14 +89,14 @@ pip3 install pyinstaller
 bash build.sh
 ```
 
-This produces `dist/Casa.app` (38 MB, self-contained). Drag it to `/Applications` or distribute
+This produces `dist/Casa.app` (≈ 38 MB, self-contained). Drag it to `/Applications` or distribute
 the generated `Casa-macOS.zip`.
 
 > **First-launch note (Gatekeeper):** Because the app is unsigned, right-click → Open on first
 > launch and confirm the dialog. Subsequent launches work with a normal double-click.
 
 On first launch you set a master password and a new vault is created. On later launches the
-same password unlocks it. The vault is stored at `~/.sifre_kasasi.dat`.
+same password unlocks it. The vault is stored at `~/.casa_vault.dat`.
 
 ## Dependencies
 

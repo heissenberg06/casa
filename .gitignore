@@ -1,21 +1,22 @@
-# --- Sanal ortam ---
+# --- Virtual environment ---
 venv/
 .venv/
 env/
 
-# --- Python ---
+# --- Python artifacts ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
 .pytest_cache/
 
-# --- KASA DOSYASI - ASLA commit edilmemeli! ---
+# --- Vault file — NEVER commit! ---
 *.dat
 *.dat.tmp
-.sifre_kasasi.dat
+.casa_vault.dat
+.casa_config.json
 
-# --- PyInstaller build çıktıları ---
+# --- PyInstaller build output ---
 build/
 dist/
 *.zip
@@ -24,10 +25,10 @@ dist/
 .DS_Store
 **/.DS_Store
 
-# --- IDE / araçlar ---
+# --- IDE / tools ---
 .idea/
 .vscode/
 *.swp
 
-# --- Claude Code ---
+# --- Claude Code memory ---
 .claude/

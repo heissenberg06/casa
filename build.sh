@@ -1,10 +1,9 @@
 #!/bin/bash
-# Casa.app build scripti
-# Kullanım: bash build.sh
+# Casa.app build script
+# Usage: bash build.sh
 
 set -e
 
-DIST_DIR="dist"
 APP_NAME="Casa.app"
 ZIP_NAME="Casa-macOS.zip"
 
@@ -13,54 +12,53 @@ echo "  Casa Password Vault — macOS App Build"
 echo "========================================"
 echo ""
 
-# PyInstaller kontrolü
+# Check for PyInstaller
 if ! command -v pyinstaller &>/dev/null; then
-    echo "PyInstaller bulunamadı. Kuruluyor..."
+    echo "PyInstaller not found. Installing..."
     pip3 install pyinstaller --break-system-packages
 fi
 
-# Eski build'i temizle
-echo "Temizleniyor..."
+# Clean previous build
+echo "Cleaning previous build..."
 rm -rf build dist __pycache__ *.pyc
 
-# Opsiyonel: icon.icns varsa bilgi ver
+# Optional custom icon
 if [ -f "icon.icns" ]; then
-    echo "Özel ikon bulundu: icon.icns"
+    echo "Custom icon found: icon.icns"
 else
-    echo "icon.icns bulunamadı — varsayılan ikon kullanılacak."
+    echo "icon.icns not found — default icon will be used."
 fi
 
 echo ""
-echo "Build başlıyor (ilk seferinde 1-2 dk sürebilir)..."
+echo "Building (may take 1-2 min on first run)..."
 echo ""
 
-# Build
 pyinstaller casa.spec --noconfirm
 
 echo ""
 echo "========================================"
-echo "  Build tamamlandı!"
+echo "  Build complete!"
 echo "========================================"
 echo ""
-echo "Uygulama: dist/Casa.app"
+echo "App: dist/Casa.app"
 echo ""
 
-# Dağıtım için zip oluştur
+# Create distribution zip
 cd dist
 zip -r --quiet "../$ZIP_NAME" "$APP_NAME"
 cd ..
 
-echo "Dağıtım paketi: $ZIP_NAME"
+echo "Distribution package: $ZIP_NAME"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  DAĞITIM NOTU"
+echo "  DISTRIBUTION NOTE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "Uygulama imzasız olduğundan diğer kullanıcılar"
-echo "ilk açılışta şu adımı uygulamalı:"
+echo "The app is unsigned. On first launch, other"
+echo "users must bypass Gatekeeper:"
 echo ""
-echo "  1. Casa.app üzerine sağ tık → Aç"
-echo "  2. Açılan uyarı penceresinde tekrar 'Aç' tıkla"
+echo "  1. Right-click Casa.app → Open"
+echo "  2. Click 'Open' in the warning dialog"
 echo ""
-echo "Sonraki açılışlarda normal çift tıkla çalışır."
+echo "Subsequent launches work with a normal double-click."
 echo ""
