@@ -7,18 +7,23 @@ Güvenlik mimarisi:
   - Master parola hiçbir yere kaydedilmez.
   - Master parola + rastgele salt  -> Argon2id -> 256-bit anahtar.
   - Tüm kasa AES-256-GCM ile şifrelenir (gizlilik + bütünlük).
-  - Diskte sadece:  salt | nonce | şifreli veri (+auth tag) durur.
-    Bunların hiçbiri master parola olmadan işe yaramaz.
+  - Diskte sadece:  MAGIC | VERSIYON | salt | nonce | şifreli veri durur.
+  - Anahtar RAM'de mlock ile kilitli tutulur; kapanışta/kilitlemede sıfırlanır.
+  - Yanlış parola denemelerinde üstel gecikme uygulanır.
+  - 5 dakika hareketsizlikte kasa otomatik kilitlenir.
 
 Kurulum:
-  pip3 install argon2-cffi cryptography
+  pip3 install argon2-cffi cryptography zxcvbn
 
 Çalıştırma:
-  python3 sifre_kasasi.py
+  python3 casa.py
 """
 
 import os
 import json
+import time
+import ctypes
+import ctypes.util
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -26,28 +31,87 @@ from argon2.low_level import hash_secret_raw, Type
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidTag
 
+try:
+    from zxcvbn import zxcvbn as _zxcvbn
+    ZXCVBN_AVAILABLE = True
+except ImportError:
+    ZXCVBN_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
 VAULT_FILE = os.path.join(os.path.expanduser("~"), ".sifre_kasasi.dat")
+VAULT_MAGIC = b"CASA"
+VAULT_VERSION = 1
 
-# Argon2id parametreleri (yüksek = brute-force'a daha dirençli, ama daha yavaş)
-ARGON_TIME = 4            # iterasyon sayısı
-ARGON_MEMORY = 128 * 1024  # KiB cinsinden = 128 MB
+# Argon2id — 256 MB bellek (GPU/ASIC saldırılarına karşı daha dirençli)
+ARGON_TIME = 4
+ARGON_MEMORY = 256 * 1024   # KiB = 256 MB
 ARGON_PARALLELISM = 4
-KEY_LEN = 32             # 256-bit anahtar
+KEY_LEN = 32
 SALT_LEN = 16
 NONCE_LEN = 12
 
-CLIPBOARD_CLEAR_MS = 20000  # panoyu 20 sn sonra temizle
-MASK = "•" * 8              # şifre gizliyken gösterilen maske (uzunluk sızdırmaz)
+CLIPBOARD_CLEAR_MS = 15_000    # pano 15 sn sonra temizlenir
+LOCK_TIMEOUT_MS = 5 * 60_000   # 5 dk hareketsizlikte kilitle
+MASK = "•" * 8
+
+
+# ---------------------------------------------------------------------------
+# Güvenli bellek tamponu
+# ---------------------------------------------------------------------------
+class SecureBuffer:
+    """
+    Hassas veriyi mlock ile swap-korumalı bellekte tutar.
+    wipe() çağrıldığında içeriği sıfırlar ve kilidi açar.
+    """
+
+    _libc = None
+
+    @classmethod
+    def _get_libc(cls):
+        if cls._libc is None:
+            try:
+                cls._libc = ctypes.CDLL(ctypes.util.find_library("c"))
+            except Exception:
+                pass
+        return cls._libc
+
+    def __init__(self, data: bytes):
+        self._len = len(data)
+        self._buf = ctypes.create_string_buffer(data, self._len)
+        libc = self._get_libc()
+        if libc:
+            try:
+                libc.mlock(self._buf, ctypes.c_size_t(self._len))
+            except Exception:
+                pass
+
+    def get(self) -> bytes:
+        if self._len == 0:
+            raise ValueError("SecureBuffer zaten silindi.")
+        return bytes(self._buf.raw[: self._len])
+
+    def wipe(self):
+        if self._len > 0:
+            ctypes.memset(self._buf, 0, self._len)
+            libc = self._get_libc()
+            if libc:
+                try:
+                    libc.munlock(self._buf, ctypes.c_size_t(self._len))
+                except Exception:
+                    pass
+            self._len = 0
+
+    def __del__(self):
+        self.wipe()
 
 
 # ---------------------------------------------------------------------------
 # Kripto katmanı
 # ---------------------------------------------------------------------------
 def derive_key(master_password: str, salt: bytes) -> bytes:
-    """Master parola + salt -> 256-bit anahtar (Argon2id)."""
+    """Master parola + salt -> 256-bit anahtar (Argon2id, 256 MB)."""
     return hash_secret_raw(
         secret=master_password.encode("utf-8"),
         salt=salt,
@@ -60,37 +124,89 @@ def derive_key(master_password: str, salt: bytes) -> bytes:
 
 
 def encrypt_vault(entries: list, key: bytes, salt: bytes) -> bytes:
-    """Kasayı şifrele. Her kayıtta YENİ nonce üretilir (GCM kuralı)."""
+    """Kasayı şifrele. Yeni formatta: MAGIC + VERSİYON + salt + nonce + şifreli."""
     nonce = os.urandom(NONCE_LEN)
     plaintext = json.dumps(entries, ensure_ascii=False).encode("utf-8")
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
-    return salt + nonce + ciphertext
+    return VAULT_MAGIC + bytes([VAULT_VERSION]) + salt + nonce + ciphertext
 
 
 def decrypt_vault(blob: bytes, master_password: str):
     """
-    Dosyayı çöz. Doğru parola + sağlam dosya ise (entries, key, salt) döner.
-    Yanlış parola veya oynanmış dosyada InvalidTag fırlatır.
+    Dosyayı çöz. Hem yeni (MAGIC + VERSİYON) hem eski format desteklenir.
+    Doğru parola + sağlam dosyada (entries, key, salt) döner.
+    Yanlış parola veya bozuk dosyada InvalidTag fırlatır.
     """
-    salt = blob[:SALT_LEN]
-    nonce = blob[SALT_LEN:SALT_LEN + NONCE_LEN]
-    ciphertext = blob[SALT_LEN + NONCE_LEN:]
+    if blob[:4] == VAULT_MAGIC:
+        # Yeni format: MAGIC(4) + VERSION(1) + SALT(16) + NONCE(12) + CIPHERTEXT
+        offset = 5
+    else:
+        # Eski format: SALT(16) + NONCE(12) + CIPHERTEXT
+        offset = 0
+
+    salt = blob[offset: offset + SALT_LEN]
+    nonce = blob[offset + SALT_LEN: offset + SALT_LEN + NONCE_LEN]
+    ciphertext = blob[offset + SALT_LEN + NONCE_LEN:]
     key = derive_key(master_password, salt)
-    plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)  # yanlışsa hata
+    plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)
     entries = json.loads(plaintext.decode("utf-8"))
     return entries, key, salt
 
 
 # ---------------------------------------------------------------------------
-# Master parola giriş ekranı
+# Parola entropi kontrolü
+# ---------------------------------------------------------------------------
+def check_password_strength(password: str):
+    """
+    (ok: bool, mesaj: str) döner.
+    zxcvbn varsa gerçekçi kırma süresi tahmini yapar;
+    yoksa temel kurallara bakar.
+    """
+    if ZXCVBN_AVAILABLE:
+        result = _zxcvbn(password)
+        score = result["score"]  # 0-4
+        if score < 3:
+            feedback = result["feedback"]
+            warning = feedback.get("warning", "")
+            suggestions = feedback.get("suggestions", [])
+            msg = warning if warning else "Parola tahmin edilebilir veya çok zayıf."
+            if suggestions:
+                msg += "\n" + "\n".join(f"• {s}" for s in suggestions[:3])
+            return False, msg
+        return True, ""
+    else:
+        # zxcvbn kurulu değilse temel kontrol
+        checks = [
+            len(password) >= 12,
+            any(c.isupper() for c in password),
+            any(c.islower() for c in password),
+            any(c.isdigit() for c in password),
+            any(not c.isalnum() for c in password),
+        ]
+        if sum(checks) < 4:
+            return False, (
+                "Parola en az 12 karakter olmalı ve büyük/küçük harf,\n"
+                "rakam ve özel karakter içermelidir.\n\n"
+                "(Daha iyi analiz için: pip3 install zxcvbn)"
+            )
+        return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Master parola giriş ekranı — brute-force korumalı
 # ---------------------------------------------------------------------------
 class UnlockDialog(tk.Toplevel):
-    """Kasa varsa parola sorar, yoksa yeni kasa için iki kez sorar."""
+    """
+    Kasa varsa parola sorar; yoksa yeni kasa oluşturur.
+    Yanlış denemelerde üstel gecikme uygular: 2, 4, 8, 16 ... 60 saniye.
+    """
 
     def __init__(self, master, vault_exists: bool):
         super().__init__(master)
         self.vault_exists = vault_exists
-        self.result = None  # (entries, key, salt)
+        self.result = None
+        self._fail_count = 0
+        self._locked_until = 0.0
 
         self.title("Şifre Kasası")
         self.resizable(False, False)
@@ -101,6 +217,7 @@ class UnlockDialog(tk.Toplevel):
             head = "Kasanı açmak için master parolanı gir"
         else:
             head = "Yeni kasa oluştur — bir master parola belirle\n(unutursan kurtarılamaz!)"
+
         ttk.Label(self, text=head, justify="center").grid(
             row=0, column=0, columnspan=2, pady=(0, 14))
 
@@ -114,41 +231,75 @@ class UnlockDialog(tk.Toplevel):
             self.pw2 = ttk.Entry(self, show="•", width=28)
             self.pw2.grid(row=2, column=1, pady=4)
 
-        btn = ttk.Button(self, text="Aç" if vault_exists else "Oluştur",
-                         command=self._submit)
-        btn.grid(row=3, column=0, columnspan=2, pady=(14, 0), sticky="ew")
+        self._status_var = tk.StringVar()
+        ttk.Label(self, textvariable=self._status_var,
+                  foreground="red", wraplength=300, justify="center").grid(
+            row=3, column=0, columnspan=2, pady=4)
+
+        self._btn = ttk.Button(
+            self, text="Aç" if vault_exists else "Oluştur", command=self._submit)
+        self._btn.grid(row=4, column=0, columnspan=2, pady=(14, 0), sticky="ew")
 
         self.bind("<Return>", lambda e: self._submit())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
+    # 2^(n-1) saniyelik gecikme; ilk iki denemede gecikme yok
+    def _backoff_seconds(self) -> float:
+        if self._fail_count < 2:
+            return 0.0
+        return float(min(2 ** (self._fail_count - 1), 60))
+
     def _submit(self):
+        remaining = self._locked_until - time.time()
+        if remaining > 0:
+            self._status_var.set(f"Çok fazla hatalı deneme. {remaining:.0f} saniye bekle.")
+            return
+
         pw = self.pw1.get()
         if not pw:
             messagebox.showwarning("Uyarı", "Parola boş olamaz.", parent=self)
             return
 
         if self.vault_exists:
+            self._btn.config(state="disabled")
+            self._status_var.set("Doğrulanıyor…")
+            self.update()
             try:
                 with open(VAULT_FILE, "rb") as f:
                     blob = f.read()
                 entries, key, salt = decrypt_vault(blob, pw)
                 self.result = (entries, key, salt)
+                self._btn.config(state="normal")
                 self.destroy()
             except (InvalidTag, ValueError):
-                messagebox.showerror("Hata", "Parola yanlış (ya da dosya bozuk).",
-                                     parent=self)
+                self._fail_count += 1
+                delay = self._backoff_seconds()
+                self._locked_until = time.time() + delay
+                self._btn.config(state="normal")
+                if delay > 0:
+                    self._status_var.set(
+                        f"Yanlış parola — {delay:.0f} saniye bekleniyor. "
+                        f"({self._fail_count}. deneme)")
+                else:
+                    self._status_var.set(f"Yanlış parola. ({self._fail_count}. deneme)")
                 self.pw1.delete(0, tk.END)
                 self.pw1.focus_set()
         else:
             if pw != self.pw2.get():
                 messagebox.showwarning("Uyarı", "Parolalar uyuşmuyor.", parent=self)
                 return
-            if len(pw) < 8:
+
+            ok, feedback = check_password_strength(pw)
+            if not ok:
                 if not messagebox.askyesno(
-                        "Zayıf parola",
-                        "Parolan 8 karakterden kısa. Yine de devam edeyim mi?",
+                        "Zayıf Parola",
+                        f"{feedback}\n\nYine de devam edeyim mi?",
                         parent=self):
                     return
+
+            self._btn.config(state="disabled")
+            self._status_var.set("Anahtar türetiliyor…")
+            self.update()
             salt = os.urandom(SALT_LEN)
             key = derive_key(pw, salt)
             self.result = ([], key, salt)
@@ -218,25 +369,28 @@ class EntryDialog(tk.Toplevel):
 # Ana pencere
 # ---------------------------------------------------------------------------
 class VaultApp:
-    def __init__(self, root, entries, key, salt):
+    def __init__(self, root: tk.Tk, entries: list, key: bytes, salt: bytes):
         self.root = root
         self.entries = entries
-        self.key = key          # oturum boyunca bellekte tutulan anahtar
+        self._secure_key = SecureBuffer(key)   # anahtar RAM'de mlock ile kilitli
         self.salt = salt
         self.show_passwords = False
         self._clip_token = None
+        self._lock_token = None
 
         root.title("Şifre Kasası")
-        root.geometry("680x420")
-        root.minsize(560, 320)
+        root.geometry("680x440")
+        root.minsize(560, 340)
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Üst butonlar
         bar = ttk.Frame(root, padding=(10, 8))
         bar.pack(fill="x")
-        ttk.Button(bar, text="+ Ekle", command=self.add_entry).pack(side="left")
-        ttk.Button(bar, text="Düzenle", command=self.edit_entry).pack(side="left", padx=6)
-        ttk.Button(bar, text="Sil", command=self.delete_entry).pack(side="left")
+        ttk.Button(bar, text="+ Ekle",        command=self.add_entry).pack(side="left")
+        ttk.Button(bar, text="Düzenle",       command=self.edit_entry).pack(side="left", padx=6)
+        ttk.Button(bar, text="Sil",           command=self.delete_entry).pack(side="left")
         ttk.Button(bar, text="Şifreyi Kopyala", command=self.copy_password).pack(side="left", padx=6)
+        ttk.Button(bar, text="🔒 Kilitle",    command=self._lock).pack(side="left", padx=6)
         self.show_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Şifreleri göster", variable=self.show_var,
                         command=self.toggle_show).pack(side="right")
@@ -244,21 +398,75 @@ class VaultApp:
         # Tablo
         cols = ("hesap", "kullanici", "sifre")
         self.tree = ttk.Treeview(root, columns=cols, show="headings", selectmode="browse")
-        self.tree.heading("hesap", text="Hesap")
+        self.tree.heading("hesap",     text="Hesap")
         self.tree.heading("kullanici", text="Kullanıcı adı")
-        self.tree.heading("sifre", text="Şifre")
-        self.tree.column("hesap", width=200, anchor="w")
+        self.tree.heading("sifre",     text="Şifre")
+        self.tree.column("hesap",     width=200, anchor="w")
         self.tree.column("kullanici", width=240, anchor="w")
-        self.tree.column("sifre", width=200, anchor="w")
+        self.tree.column("sifre",     width=200, anchor="w")
         self.tree.pack(fill="both", expand=True, padx=10, pady=(0, 6))
         self.tree.bind("<Double-1>", lambda e: self.edit_entry())
 
-        ttk.Label(root, text="Çift tıkla = düzenle  •  pano 20 sn sonra otomatik temizlenir",
+        self._status_var = tk.StringVar()
+        ttk.Label(root, textvariable=self._status_var,
                   foreground="#888").pack(pady=(0, 8))
 
+        self._setup_auto_lock()
         self.refresh()
 
-    # ---- tablo yenileme ----
+    # ---- Otomatik kilitleme ----
+    def _setup_auto_lock(self):
+        self._reset_lock_timer()
+        self.root.bind_all("<KeyPress>",    self._on_activity, add="+")
+        self.root.bind_all("<ButtonPress>", self._on_activity, add="+")
+        self.root.bind_all("<Motion>",      self._on_activity, add="+")
+
+    def _on_activity(self, *_):
+        self._reset_lock_timer()
+
+    def _reset_lock_timer(self):
+        if self._lock_token:
+            self.root.after_cancel(self._lock_token)
+        self._lock_token = self.root.after(LOCK_TIMEOUT_MS, self._lock)
+        mins = LOCK_TIMEOUT_MS // 60_000
+        self._status_var.set(
+            f"Çift tıkla = düzenle  •  pano 15 sn temizlenir  •  {mins} dk sonra otomatik kilitlenir")
+
+    def _lock(self):
+        """Anahtarı RAM'den sil, giriş ekranını göster."""
+        if self._lock_token:
+            self.root.after_cancel(self._lock_token)
+            self._lock_token = None
+
+        # Hassas verileri bellekten sil
+        if self._secure_key:
+            self._secure_key.wipe()
+            self._secure_key = None
+        self.entries = []
+        self.tree.delete(*self.tree.get_children())
+
+        self.root.withdraw()
+        dlg = UnlockDialog(self.root, True)
+        self.root.wait_window(dlg)
+
+        if dlg.result is None:
+            self._on_close()
+            return
+
+        entries, key, salt = dlg.result
+        self.entries = entries
+        self._secure_key = SecureBuffer(key)
+        self.salt = salt
+        self.root.deiconify()
+        self._setup_auto_lock()
+        self.refresh()
+
+    def _on_close(self):
+        if self._secure_key:
+            self._secure_key.wipe()
+        self.root.destroy()
+
+    # ---- Tablo yenileme ----
     def refresh(self):
         sel = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
@@ -308,7 +516,7 @@ class VaultApp:
             self.save()
             self.refresh()
 
-    # ---- pano ----
+    # ---- Pano ----
     def copy_password(self):
         idx = self._selected_index()
         if idx is None:
@@ -317,10 +525,10 @@ class VaultApp:
         pw = self.entries[idx]["sifre"]
         self.root.clipboard_clear()
         self.root.clipboard_append(pw)
-        # önceki temizleme zamanlayıcısını iptal et, yenisini kur
         if self._clip_token:
             self.root.after_cancel(self._clip_token)
-        self._clip_token = self.root.after(CLIPBOARD_CLEAR_MS, lambda: self._clear_clip(pw))
+        self._clip_token = self.root.after(
+            CLIPBOARD_CLEAR_MS, lambda: self._clear_clip(pw))
 
     def _clear_clip(self, expected):
         try:
@@ -331,16 +539,16 @@ class VaultApp:
             pass
         self._clip_token = None
 
-    # ---- diske yaz ----
+    # ---- Diske yaz ----
     def save(self):
-        blob = encrypt_vault(self.entries, self.key, self.salt)
-        # önce geçici dosyaya yaz, sonra taşı (yazma sırasında çökerse veri kaybı olmasın)
+        key = self._secure_key.get()
+        blob = encrypt_vault(self.entries, key, self.salt)
         tmp = VAULT_FILE + ".tmp"
         with open(tmp, "wb") as f:
             f.write(blob)
         os.replace(tmp, VAULT_FILE)
         try:
-            os.chmod(VAULT_FILE, 0o600)  # sadece sahibi okuyup yazabilsin
+            os.chmod(VAULT_FILE, 0o600)
         except OSError:
             pass
 
@@ -350,7 +558,7 @@ class VaultApp:
 # ---------------------------------------------------------------------------
 def main():
     root = tk.Tk()
-    root.withdraw()  # ana pencereyi parola girilene kadar gizle
+    root.withdraw()
 
     vault_exists = os.path.exists(VAULT_FILE)
     dlg = UnlockDialog(root, vault_exists)
