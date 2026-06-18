@@ -87,13 +87,22 @@ class SecureBuffer:
 
     def __init__(self, data: bytes):
         self._len = len(data)
+        self._locked = False
         self._buf = ctypes.create_string_buffer(data, self._len)
         libc = self._get_libc()
         if libc:
             try:
-                libc.mlock(self._buf, ctypes.c_size_t(self._len))
+                ret = libc.mlock(self._buf, ctypes.c_size_t(self._len))
+                self._locked = (ret == 0)
             except Exception:
                 pass
+        if not self._locked:
+            import sys
+            print(
+                "[UYARI] mlock başarısız: bu tampon swap'a yazılabilir. "
+                "RLIMIT_MEMLOCK limitini kontrol et.",
+                file=sys.stderr,
+            )
 
     def get(self) -> bytes:
         if self._len == 0:
@@ -267,6 +276,8 @@ def decrypt_vault(blob: bytes, master_password: str):
     Plaintext bytearray JSON parse sonrası sıfırlanır.
     """
     if blob[:4] == VAULT_MAGIC:
+        if blob[4] != VAULT_VERSION:
+            raise ValueError(f"Desteklenmeyen vault versiyonu: {blob[4]}")
         offset = 5
     else:
         offset = 0
@@ -574,11 +585,12 @@ class VaultApp:
             return
 
         entries, key, salt = dlg.result
+        self._secure_key.wipe()          # eski anahtarı önce sil, sonra yenisini ata
         self._secure_key = SecureBuffer(key)
         self.salt = salt
         self.store = EncryptedStore(entries)
         self.root.deiconify()
-        self._setup_auto_lock()
+        self._reset_lock_timer()  # mevcut binding'leri yeniden kullan, birikmesini önle
         self.refresh()
 
     def _on_close(self):
@@ -669,13 +681,9 @@ class VaultApp:
         key = self._secure_key.get()
         blob = encrypt_vault(entries, key, self.salt)  # plaintext bytearray içinde sıfırlanır
         tmp = VAULT_FILE + ".tmp"
-        with open(tmp, "wb") as f:
+        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as f:
             f.write(blob)
         os.replace(tmp, VAULT_FILE)
-        try:
-            os.chmod(VAULT_FILE, 0o600)
-        except OSError:
-            pass
 
 
 # ---------------------------------------------------------------------------
